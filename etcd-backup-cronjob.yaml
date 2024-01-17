@@ -1,0 +1,105 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-hostpath1
+  labels:
+    pv: pv-hostpath1
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+  - ReadWriteOnce
+  hostPath:
+    path: /Users/sunhobaik/Desktop/etcd-backup/backup-db
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: etcd-backup
+  namespace: kube-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: ""
+  selector:
+    matchLabels:
+      pv: pv-hostpath1
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etcd-backup
+  namespace: kube-system
+spec:
+  concurrencyPolicy: Allow
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - args:
+            - -c
+            - etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt
+              --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key
+              snapshot save /backup/etcd-snapshot-$(date +%Y%m%d_%H%M%S_%Z).db
+            command:
+            - /bin/sh
+            env:
+            - name: ETCDCTL_API
+              value: "3"
+            image: k8s.gcr.io/etcd-amd64:3.3.15
+            imagePullPolicy: IfNotPresent
+            name: backup
+            resources: {}
+            terminationMessagePath: /dev/termination-log
+            terminationMessagePolicy: File
+            volumeMounts:
+            - mountPath: /etc/kubernetes/pki/etcd
+              name: etcd-certs
+              readOnly: true
+            - mountPath: /backup
+              name: backup
+          - args:
+            - -c
+            - find /backup -type f -mtime +30 -name '*.db' -exec rm -- '{}' \;
+            command:
+            - /bin/sh
+            image: busybox:1.31.1
+            imagePullPolicy: IfNotPresent
+            name: backup-purge
+            volumeMounts:
+            - mountPath: /backup
+              name: backup
+          dnsPolicy: ClusterFirst
+          hostNetwork: true
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                    - key: node-role.kubernetes.io/control-plane
+                      operator: Exists
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              effect: NoSchedule
+              operator: Exists
+          restartPolicy: OnFailure
+          schedulerName: default-scheduler
+          securityContext: {}
+          terminationGracePeriodSeconds: 30
+          volumes:
+          - hostPath:
+              path: /etc/kubernetes/pki/etcd
+              type: DirectoryOrCreate
+            name: etcd-certs
+          - name: backup
+            persistentVolumeClaim:
+              claimName: etcd-backup
+  schedule: "*/1 * * * *"
+  successfulJobsHistoryLimit: 3
+  suspend: false
